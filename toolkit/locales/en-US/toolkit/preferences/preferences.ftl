@@ -40,3 +40,43 @@ remove-primary-password-warning1 = Your Primary Password is used to protect sens
 remove-primary-password-warning2 = If you remove your Primary Password your information will not be protected if your computer is compromised.
 remove-password-old =
     .label = Current password:
+
+## Password policy
+##
+## Shown under the new-password field when a policy tier is configured and the
+## typed password fails it. Each rule is its own message so the user is told
+## what to change rather than only that something is wrong.
+
+#   $min (Number) - the minimum number of characters the policy requires
+primary-password-policy-min-length = At least { $min } characters
+
+primary-password-policy-uppercase = An uppercase letter
+
+primary-password-policy-lowercase = A lowercase letter
+
+primary-password-policy-digit = A digit
+
+primary-password-policy-special = A symbol
+
+# Shown when the strength estimator scores the password below the tier's
+# minimum. Deliberately vague about why: the reason follows in one of the
+# primary-password-policy-reason-* messages.
+primary-password-policy-strength = A less predictable password
+
+## Why the estimator scored the password low.
+##
+## Mapped from zxcvbn's `pattern` field for each matched sequence, which is a
+## closed set of seven values, rather than from its English `warning` strings --
+## those are prose inside a vendored library and change without notice.
+
+primary-password-policy-reason-dictionary = It contains a common word or password.
+
+primary-password-policy-reason-spatial = It is a pattern of nearby keys on the keyboard.
+
+primary-password-policy-reason-repeat = It repeats the same characters or words.
+
+primary-password-policy-reason-sequence = It is a run of characters in order, like abc or 6543.
+
+primary-password-policy-reason-date = It looks like a date or a year.
+
+primary-password-policy-reason-bruteforce = It is short.
