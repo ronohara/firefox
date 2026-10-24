@@ -4,8 +4,7 @@
 
 const lazy = {};
 ChromeUtils.defineESModuleGetters(lazy, {
-  PrimaryPasswordPolicy:
-    "resource://gre/modules/PrimaryPasswordPolicy.sys.mjs",
+  PrimaryPasswordPolicy: "resource://gre/modules/PrimaryPasswordPolicy.sys.mjs",
   ProfileKekPassword: "resource://gre/modules/ProfileKekPassword.sys.mjs",
 });
 
@@ -52,14 +51,6 @@ function readPolicy() {
     console.warn(
       `Primary Password policy: unknown tier "${resolved.requested}", ` +
         `falling back to "${resolved.name}"`
-    );
-  }
-  const unenforced =
-    lazy.PrimaryPasswordPolicy.unenforcedRules(resolved.rules);
-  if (unenforced.length) {
-    console.warn(
-      `Primary Password policy: tier "${resolved.name}" asks for ` +
-        `${unenforced.join(", ")}, which nothing in this tree checks`
     );
   }
   return { name: resolved.name, rules: resolved.rules };
@@ -182,56 +173,105 @@ async function setPassword(event) {
   }
 }
 
-function setPasswordStrength() {
-  // Here is how we weigh the quality of the password
-  // number of characters
-  // numbers
-  // non-alpha-numeric chars
-  // upper and lower case characters
-
-  var pw = document.getElementById("pw1").value;
-
-  // length of the password
-  var pwlength = pw.length;
-  if (pwlength > 5) {
-    pwlength = 5;
+/**
+ * The one evaluation of the typed password.
+ *
+ * Both the meter and the acceptance gate read this, and that is the point of
+ * the function existing: when a policy is set, a password can no longer look
+ * strong on the meter and be refused by the gate, or the reverse. They are two
+ * renderings of one answer.
+ *
+ * Without a policy there is no gate to disagree with, so `meter` falls back to
+ * the heuristic this dialog has always used and `failures` is empty. That is
+ * deliberate: this file is shared with Firefox, and replacing its meter with
+ * an estimator would be a behaviour change to the normal build made through a
+ * fork's preference.
+ *
+ * @param {string} password
+ * @returns {{meter: number, failures: string[], score: number|null}}
+ *   `meter` is the 0-100 value for the progress bar; `failures` is empty when
+ *   there is no policy, or when the password satisfies it; `score` is the
+ *   estimator's 0-4, or null when no policy means it was never computed.
+ */
+function evaluatePassword(password) {
+  if (!gPolicy) {
+    return { meter: legacyMeter(password), failures: [], score: null };
   }
 
-  // use of numbers in the password
+  // Computed once and reused: `failingRules()` accepts the score so the
+  // estimator does not run twice per keystroke, and the meter reads the same
+  // number the gate refused on.
+  const { score } = lazy.PrimaryPasswordPolicy.estimateScore(password);
+  const failures = password
+    ? lazy.PrimaryPasswordPolicy.failingRules(password, gPolicy.rules, () => ({
+        score,
+      }))
+    : [];
+
+  // An empty password is the removal case: no bar, nothing refused.
+  const meter = password ? meterForScore(score) : 0;
+  return { meter, failures, score };
+}
+
+/**
+ * Maps the estimator's 0-4 onto the progress bar's 0-100.
+ *
+ * Four equal bands rather than a continuous scale from `guesses_log10`: the
+ * score is what the policy compares against, so the bar showing anything else
+ * would be a second opinion about the same password.
+ *
+ * @param {number|null} score
+ * @returns {number}
+ */
+function meterForScore(score) {
+  if (!Number.isInteger(score) || score < 0 || score > 4) {
+    // The estimator could not be used. Show nothing rather than a guess, and
+    // let the policy text carry the refusal -- a bar at 0 reads as "empty",
+    // which is a different claim from "not measured".
+    return 0;
+  }
+  return score * 25;
+}
+
+/**
+ * The dialog's long-standing heuristic, kept for the no-policy case only.
+ *
+ * @param {string} pw
+ * @returns {number} 0-100.
+ */
+function legacyMeter(pw) {
+  var pwlength = pw.length > 5 ? 5 : pw.length;
   var numnumeric = pw.replace(/[0-9]/g, "");
   var numeric = pw.length - numnumeric.length;
   if (numeric > 3) {
     numeric = 3;
   }
-
-  // use of symbols in the password
   var symbols = pw.replace(/\W/g, "");
   var numsymbols = pw.length - symbols.length;
   if (numsymbols > 3) {
     numsymbols = 3;
   }
-
-  // use of uppercase in the password
   var numupper = pw.replace(/[A-Z]/g, "");
   var upper = pw.length - numupper.length;
   if (upper > 3) {
     upper = 3;
   }
-
   var pwstrength =
     pwlength * 10 - 20 + numeric * 10 + numsymbols * 15 + upper * 10;
-
-  // make sure we're give a value between 0 and 100
   if (pwstrength < 0) {
     pwstrength = 0;
   }
-
   if (pwstrength > 100) {
     pwstrength = 100;
   }
+  return pwstrength;
+}
 
-  var mymeter = document.getElementById("pwmeter");
-  mymeter.value = pwstrength;
+function setPasswordStrength() {
+  // One computation: the same evaluation the gate uses.
+  const pw = document.getElementById("pw1").value;
+  const { meter } = evaluatePassword(pw);
+  document.getElementById("pwmeter").value = meter;
 }
 
 /**
@@ -240,19 +280,22 @@ function setPasswordStrength() {
  * appears for an application that does not configure one.
  *
  * @param {string} password
+ * @param {object} [evaluation] The result of `evaluatePassword()` for this
+ *   password. Passed in so the meter and this text cannot disagree.
  * @returns {boolean} true when the password satisfies the policy, or when
  *   there is no policy.
  */
-function updatePolicyFeedback(password) {
+function updatePolicyFeedback(password, evaluation) {
   const el = document.getElementById("pw-policy");
   if (!gPolicy) {
     el.hidden = true;
     return true;
   }
-  const failures = lazy.PrimaryPasswordPolicy.failingRules(
-    password,
-    gPolicy.rules
-  );
+  // Takes the evaluation the meter also read, rather than recomputing: with an
+  // estimator behind it, computing twice per keystroke would be wasteful and
+  // -- worse -- two computations could disagree, which is the failure this
+  // item exists to remove.
+  const { failures } = evaluation ?? evaluatePassword(password);
   // An empty password is the removal case, which the dialog's own rules
   // govern; nothing is reported against it.
   if (!password || !failures.length) {
@@ -289,6 +332,8 @@ function describeRule(rule) {
       return "a digit";
     case "special":
       return "a symbol";
+    case "strength":
+      return "a less predictable password";
     default:
       return rule;
   }
@@ -313,7 +358,11 @@ function checkPasswords() {
   // A policy tier is enforced here, and only when one is configured. It can
   // disable the accept button but never enables it: the existing rules above
   // still decide whether this is a change the dialog may perform at all.
-  const policyOk = updatePolicyFeedback(pw1);
+  //
+  // The evaluation is made once and passed to the feedback renderer, so the
+  // text under the field and the button's state come from the same answer.
+  const evaluation = evaluatePassword(pw1);
+  const policyOk = updatePolicyFeedback(pw1, evaluation);
 
   let enabled =
     pw1 == pw2 &&

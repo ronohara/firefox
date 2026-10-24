@@ -1,0 +1,28 @@
+schema: 1
+
+bugzilla:
+  product: Toolkit
+  component: General
+
+origin:
+  name: zxcvbn
+  description: Realistic password strength estimation
+  url: https://github.com/dropbox/zxcvbn
+  release: v4.4.2 (2017-02-07T00:00:00Z).
+  revision: 0b7f691c370d922399fe60927433338c062dde23
+  license: MIT
+  license-file: LICENSE
+
+vendoring:
+  url: https://github.com/dropbox/zxcvbn
+  source-hosting: github
+  flavor: individual-files
+
+  individual-files:
+    - upstream: LICENSE.txt
+      destination: LICENSE
+    - upstream: dist/zxcvbn.js
+      destination: zxcvbn.mjs
+
+  patches:
+    - add_exports.patch

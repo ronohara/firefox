@@ -2,6 +2,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+import zxcvbn from "resource:///modules/zxcvbn.mjs";
+
 /**
  * Password policy tiers for a Primary Password, as data rather than as a
  * branch inside a dialog.
@@ -35,8 +37,8 @@ export const CUSTOM_PREF = "security.primary_password.policy.custom";
 
 /**
  * The tiers, with the six fields the design asks for. `minStrength` is the
- * zxcvbn-style score, 0-4; this module does not enforce it, because there is no
- * estimator in the tree -- see `unenforcedRules()`.
+ * zxcvbn score, 0-4, and it *is* enforced: zxcvbn 4.4.2 is vendored at
+ * `third_party/js/zxcvbn/` and imported above.
  *
  * @type {Record<string, {minLength: number, requireUppercase: boolean,
  *   requireLowercase: boolean, requireDigit: boolean,
@@ -84,27 +86,36 @@ export const RULES = [
   "lowercase",
   "digit",
   "special",
+  "strength",
 ];
 
 /**
- * Rules a tier can ask for that this application cannot check.
+ * The score a password actually earns, 0-4.
  *
- * The tier vocabulary includes a strength score because `workbench-development`
- * scores passwords with zxcvbn, and the vocabulary is shared. **There is no
- * password-strength estimator in this tree** -- searched on 2026-10-24 -- and
- * inventing one from the dialog's 0-100 meter would turn a shared name into a
- * different rule wearing it.
+ * zxcvbn is deliberately advisory in Firefox's hands elsewhere, but here it
+ * gates a decision -- so the failure modes are handled rather than assumed:
+ * an estimator that throws, or returns something that is not a score, must not
+ * silently pass a weak password and must not block a strong one.
  *
- * So the score is carried as data and reported as unenforced. It must never
- * be a failure: a tier asking for a score of 3 would then reject every
- * password, including correct ones, and the Primary Password could not be set
- * at all -- a lockout dressed as a policy.
- *
- * @param {object} rules
- * @returns {string[]} Rule names the tier asks for but nothing checks.
+ * @param {string} password
+ * @returns {{score: number|null, error: string|null}} `score` is null when the
+ *   estimator could not be used; `error` says why.
  */
-export function unenforcedRules(rules) {
-  return rules.minStrength > 0 ? ["strength"] : [];
+export function estimateScore(password) {
+  try {
+    const result = zxcvbn(password);
+    if (
+      !result ||
+      !Number.isInteger(result.score) ||
+      result.score < 0 ||
+      result.score > 4
+    ) {
+      return { score: null, error: "estimator returned no usable score" };
+    }
+    return { score: result.score, error: null };
+  } catch (ex) {
+    return { score: null, error: String(ex) };
+  }
 }
 
 const RE_UPPER = /[A-Z]/;
@@ -196,10 +207,12 @@ function normaliseCustom(custom) {
  *
  * @param {string} password
  * @param {object} rules From `resolveTier()`.
+ * @param {Function} [estimator] Injected for tests; defaults to zxcvbn via
+ *   `estimateScore()`.
  * @returns {string[]} Failing rule names, empty when the password is
  *   acceptable.
  */
-export function failingRules(password, rules) {
+export function failingRules(password, rules, estimator = estimateScore) {
   if (!password) {
     return [];
   }
@@ -219,6 +232,21 @@ export function failingRules(password, rules) {
   if (rules.requireSpecial && !RE_SPECIAL.test(password)) {
     failures.push("special");
   }
-  // A strength minimum is deliberately absent here: see unenforcedRules().
+  // The score is checked last, and only when the tier asks for one. An
+  // estimator failure is reported as a failure rather than passed: a
+  // requirement that cannot be checked has not been met, and silently
+  // accepting would tell the user their password cleared a bar nobody
+  // measured. It is *reported*, not thrown, so the dialog can say which rule
+  // and the user is never left with an unresponsive button.
+  if (rules.minStrength > 0) {
+    const { score } = estimator(password);
+    // Validated here, not only in `estimateScore()`: this function accepts an
+    // injected estimator, and a value outside 0-4 is not a score. Trusting it
+    // would let one bad return turn a requirement into a pass.
+    const usable = Number.isInteger(score) && score >= 0 && score <= 4;
+    if (!usable || score < rules.minStrength) {
+      failures.push("strength");
+    }
+  }
   return failures;
 }

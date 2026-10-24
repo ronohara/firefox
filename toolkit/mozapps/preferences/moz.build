@@ -8,5 +8,6 @@ with Files("**"):
 JAR_MANIFESTS += ["jar.mn"]
 
 EXTRA_JS_MODULES += [
+    "../../../third_party/js/zxcvbn/zxcvbn.mjs",
     "PrimaryPasswordPolicy.sys.mjs",
 ]
