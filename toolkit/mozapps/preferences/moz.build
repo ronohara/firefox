@@ -6,3 +6,7 @@ with Files("**"):
     BUG_COMPONENT = ("Toolkit", "Preferences")
 
 JAR_MANIFESTS += ["jar.mn"]
+
+EXTRA_JS_MODULES += [
+    "PrimaryPasswordPolicy.sys.mjs",
+]

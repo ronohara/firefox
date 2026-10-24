@@ -4,10 +4,69 @@
 
 const lazy = {};
 ChromeUtils.defineESModuleGetters(lazy, {
+  PrimaryPasswordPolicy:
+    "resource://gre/modules/PrimaryPasswordPolicy.sys.mjs",
   ProfileKekPassword: "resource://gre/modules/ProfileKekPassword.sys.mjs",
 });
 
+/**
+ * The rule set in force for this dialog, resolved once when it opens.
+ *
+ * Read at open rather than at module load so a policy pushed by the
+ * `Preferences` enterprise policy applies to the next change without a
+ * restart. An unset tier preference means no policy: `failingRules()` is not
+ * consulted and the dialog behaves exactly as it did before this existed,
+ * which is what keeps Firefox unaffected.
+ *
+ * @type {{name: string, rules: object}|null}
+ */
+var gPolicy = null;
+
+/**
+ * Reads the tier preference and resolves it.
+ *
+ * @returns {{name: string, rules: object}|null} null when no policy is set.
+ */
+function readPolicy() {
+  const tier = Services.prefs.getStringPref(
+    lazy.PrimaryPasswordPolicy.TIER_PREF,
+    ""
+  );
+  if (!tier) {
+    return null;
+  }
+  let custom = null;
+  const raw = Services.prefs.getStringPref(
+    lazy.PrimaryPasswordPolicy.CUSTOM_PREF,
+    ""
+  );
+  if (raw) {
+    try {
+      custom = JSON.parse(raw);
+    } catch (ex) {
+      console.error("Primary Password policy: custom tier is not JSON", ex);
+    }
+  }
+  const resolved = lazy.PrimaryPasswordPolicy.resolveTier(tier, custom);
+  if (resolved.unknownTier) {
+    console.warn(
+      `Primary Password policy: unknown tier "${resolved.requested}", ` +
+        `falling back to "${resolved.name}"`
+    );
+  }
+  const unenforced =
+    lazy.PrimaryPasswordPolicy.unenforcedRules(resolved.rules);
+  if (unenforced.length) {
+    console.warn(
+      `Primary Password policy: tier "${resolved.name}" asks for ` +
+        `${unenforced.join(", ")}, which nothing in this tree checks`
+    );
+  }
+  return { name: resolved.name, rules: resolved.rules };
+}
+
 function init() {
+  gPolicy = readPolicy();
   process();
   document.addEventListener("dialogaccept", setPassword);
   document.getElementById("pw1").addEventListener("input", () => {
@@ -175,6 +234,66 @@ function setPasswordStrength() {
   mymeter.value = pwstrength;
 }
 
+/**
+ * Shows which policy rules the typed password fails, and reports whether any
+ * do. The element is left hidden when no policy is set, so no new markup
+ * appears for an application that does not configure one.
+ *
+ * @param {string} password
+ * @returns {boolean} true when the password satisfies the policy, or when
+ *   there is no policy.
+ */
+function updatePolicyFeedback(password) {
+  const el = document.getElementById("pw-policy");
+  if (!gPolicy) {
+    el.hidden = true;
+    return true;
+  }
+  const failures = lazy.PrimaryPasswordPolicy.failingRules(
+    password,
+    gPolicy.rules
+  );
+  // An empty password is the removal case, which the dialog's own rules
+  // govern; nothing is reported against it.
+  if (!password || !failures.length) {
+    el.hidden = true;
+    return true;
+  }
+  el.hidden = false;
+  el.textContent = `${gPolicy.name} policy: ${failures
+    .map(describeRule)
+    .join("; ")}`;
+  return false;
+}
+
+/**
+ * Human wording for a failing rule.
+ *
+ * Deliberately not localized in this change: the policy is new, the wording
+ * is provisional, and adding Fluent strings for a feature whose tier is still
+ * being chosen would fix the text before the requirement is settled. The plan
+ * records this as a follow-up rather than presenting the English as final.
+ *
+ * @param {string} rule
+ * @returns {string}
+ */
+function describeRule(rule) {
+  switch (rule) {
+    case "min-length":
+      return `at least ${gPolicy.rules.minLength} characters`;
+    case "uppercase":
+      return "an uppercase letter";
+    case "lowercase":
+      return "a lowercase letter";
+    case "digit":
+      return "a digit";
+    case "special":
+      return "a symbol";
+    default:
+      return rule;
+  }
+}
+
 function checkPasswords() {
   var pw1 = document.getElementById("pw1").value;
   var pw2 = document.getElementById("pw2").value;
@@ -191,9 +310,15 @@ function checkPasswords() {
     return;
   }
 
+  // A policy tier is enforced here, and only when one is configured. It can
+  // disable the accept button but never enables it: the existing rules above
+  // still decide whether this is a change the dialog may perform at all.
+  const policyOk = updatePolicyFeedback(pw1);
+
   let enabled =
     pw1 == pw2 &&
-    (pw1 != "" || Services.policies.isAllowed("removeMasterPassword"));
+    (pw1 != "" || Services.policies.isAllowed("removeMasterPassword")) &&
+    policyOk;
   ok.toggleAttribute("disabled", !enabled);
 }
 
