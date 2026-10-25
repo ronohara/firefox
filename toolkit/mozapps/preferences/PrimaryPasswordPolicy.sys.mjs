@@ -2,7 +2,55 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-import zxcvbn from "resource:///modules/zxcvbn.mjs";
+/** Cached namespace for the vendored estimator, filled on first use. */
+var gZxcvbn = null;
+
+const ESTIMATOR_URL = "resource://gre/modules/zxcvbn.mjs";
+
+/**
+ * The estimator callable, loaded on first use.
+ *
+ * `ChromeUtils.importESModule` rather than a static `import` or
+ * `defineESModuleGetters`:
+ *
+ *  - a static import of a `resource:///modules/` URL is rejected by
+ *    `mozilla/no-browser-refs-in-toolkit`, because toolkit also runs where
+ *    Firefox's module tree is absent;
+ *  - and `defineESModuleGetters` declares the property but leaves it
+ *    `undefined` here -- measured 2026-10-25 with a probe inside this module,
+ *    the same silent failure seen from `RNP.sys.mjs` while a direct import of
+ *    the identical URL worked.
+ *
+ * A failed load is remembered as `null` so this is attempted once, not on
+ * every keystroke.
+ *
+ * @returns {Function|null}
+ */
+function estimatorFunction() {
+  if (gZxcvbn !== null) {
+    return gZxcvbn;
+  }
+  try {
+    const ns = ChromeUtils.importESModule(ESTIMATOR_URL);
+    gZxcvbn = typeof ns.default === "function" ? ns.default : null;
+  } catch (ex) {
+    console.error("Primary Password policy: estimator unavailable", ex);
+    gZxcvbn = null;
+  }
+  return gZxcvbn;
+}
+
+/**
+ * Loads the estimator, if it is not already available.
+ *
+ * Called once, from the dialog's init. Returns false rather than throwing, so a
+ * missing module degrades to "no score" instead of breaking the dialog.
+ *
+ * @returns {boolean} true when the estimator can be used.
+ */
+export function loadEstimator() {
+  return typeof estimatorFunction() === "function";
+}
 
 /**
  * Password policy tiers for a Primary Password, as data rather than as a
@@ -79,42 +127,139 @@ export const TIERS = {
   },
 };
 
-/** Every rule a password can fail, in the order a message should list them. */
+/**
+ * Every rule a password can fail, in the order a message should list them,
+ * with the Fluent id that names it.
+ *
+ * Data, not a branch: `changemp.js` renders whatever is in this list, so a
+ * rule can be added here and its string added to the FTL without touching the
+ * dialog. That is the same shape as the tier table above, for the same reason.
+ */
 export const RULES = [
-  "min-length",
-  "uppercase",
-  "lowercase",
-  "digit",
-  "special",
-  "strength",
+  { id: "min-length", l10n: "primary-password-policy-min-length" },
+  { id: "uppercase", l10n: "primary-password-policy-uppercase" },
+  { id: "lowercase", l10n: "primary-password-policy-lowercase" },
+  { id: "digit", l10n: "primary-password-policy-digit" },
+  { id: "special", l10n: "primary-password-policy-special" },
+  { id: "strength", l10n: "primary-password-policy-strength" },
 ];
 
+/** Rule ids alone, for callers that only need to know which failed. */
+export const RULE_IDS = RULES.map(r => r.id);
+
 /**
- * The score a password actually earns, 0-4.
+ * The Fluent id that names a rule.
+ *
+ * @param {string} id
+ * @returns {string|null}
+ */
+export function ruleL10nId(id) {
+  return RULES.find(r => r.id === id)?.l10n ?? null;
+}
+
+/**
+ * zxcvbn's `pattern` values, mapped to a Fluent id explaining that pattern.
+ *
+ * **Mapped from the structured field, not from the English `warning` string.**
+ * The warning is prose inside a vendored library: it is not translated, it
+ * changes when the library is upgraded, and matching on it would silently
+ * produce nothing the day a wording changes. `pattern` is a closed set the
+ * library documents and its own code switches on, so it is a contract.
+ *
+ * `bruteforce` is the catch-all for characters that matched no pattern -- it
+ * means "nothing specific to say, it was simply short or unusual", and it is
+ * the weakest message of the set, which is why it is last.
+ */
+export const PATTERN_L10N = {
+  dictionary: "primary-password-policy-reason-dictionary",
+  spatial: "primary-password-policy-reason-spatial",
+  repeat: "primary-password-policy-reason-repeat",
+  sequence: "primary-password-policy-reason-sequence",
+  date: "primary-password-policy-reason-date",
+  regex: "primary-password-policy-reason-date",
+  bruteforce: "primary-password-policy-reason-bruteforce",
+};
+
+/**
+ * The pattern that best explains a low score.
+ *
+ * Chosen by the length of the matched token, not by order: the longest match
+ * is what made the password guessable, so `Password1!` reports the dictionary
+ * hit rather than the three characters of brute force after it.
+ *
+ * @param {object} result A zxcvbn result.
+ * @returns {string|null} A Fluent id, or null when nothing was matched.
+ */
+export function explainingPatternL10nId(result) {
+  const seq = result?.sequence;
+  if (!Array.isArray(seq) || !seq.length) {
+    return null;
+  }
+  let best = null;
+  for (const match of seq) {
+    const l10n = PATTERN_L10N[match?.pattern];
+    if (!l10n) {
+      continue;
+    }
+    // `bruteforce` only stands in when nothing more specific matched, so it is
+    // held to a lower priority than any real pattern of the same length.
+    const weight =
+      match.pattern === "bruteforce" ? -1 : (match.token?.length ?? 0);
+    if (!best || weight > best.weight) {
+      best = { l10n, weight };
+    }
+  }
+  return best?.l10n ?? null;
+}
+
+/**
+ * The score a password actually earns, 0-4, and what made it that score.
  *
  * zxcvbn is deliberately advisory in Firefox's hands elsewhere, but here it
  * gates a decision -- so the failure modes are handled rather than assumed:
  * an estimator that throws, or returns something that is not a score, must not
  * silently pass a weak password and must not block a strong one.
  *
+ * `reasonL10n` is included so a caller can say *why* rather than only that the
+ * password was weak, which is the difference between a message that teaches
+ * and one that only refuses. It is null when no explanation is available,
+ * including whenever the score is unusable.
+ *
  * @param {string} password
- * @returns {{score: number|null, error: string|null}} `score` is null when the
- *   estimator could not be used; `error` says why.
+ * @returns {{score: number|null, error: string|null,
+ *   reasonL10n: string|null}} `score` is null when the estimator could not be
+ *   used; `error` says why.
  */
 export function estimateScore(password) {
+  const estimate = estimatorFunction();
+  if (!estimate) {
+    return {
+      score: null,
+      error: "estimator not loaded",
+      reasonL10n: null,
+    };
+  }
   try {
-    const result = zxcvbn(password);
+    const result = estimate(password);
     if (
       !result ||
       !Number.isInteger(result.score) ||
       result.score < 0 ||
       result.score > 4
     ) {
-      return { score: null, error: "estimator returned no usable score" };
+      return {
+        score: null,
+        error: "estimator returned no usable score",
+        reasonL10n: null,
+      };
     }
-    return { score: result.score, error: null };
+    return {
+      score: result.score,
+      error: null,
+      reasonL10n: explainingPatternL10nId(result),
+    };
   } catch (ex) {
-    return { score: null, error: String(ex) };
+    return { score: null, error: String(ex), reasonL10n: null };
   }
 }
 
@@ -195,6 +340,54 @@ function normaliseCustom(custom) {
     out.minStrength = Math.trunc(strength);
   }
   return out;
+}
+
+/**
+ * Scores an existing password and says whether it would satisfy the policy, as
+ * **advice only**.
+ *
+ * Item 59's requirement, and the shape of the function is the requirement: the
+ * result is descriptive, and nothing in this module refuses anything on it. An
+ * account whose password was accepted last year must still open today, so a
+ * caller may show this and may not act on it.
+ *
+ * The tiers and the estimator are here already, so the question belongs here
+ * rather than in a caller -- and this keeps the answer inside the toolkit
+ * namespace, which is the only one a toolkit file may reach.
+ *
+ * Never throws: advice that can break a dialog is worse than no advice.
+ *
+ * @param {string} password
+ * @param {string} tierName The configured tier, empty for no policy.
+ * @param {object} [custom] Fields for the `custom` tier.
+ * @returns {{scored: boolean, score: number|null, belowPolicy: boolean,
+ *   tier: string|null, reasonL10n: string|null}} `scored` is false when there
+ *   is no policy, no plaintext, or no usable score.
+ */
+export function scoreExistingPassword(password, tierName, custom) {
+  const nothing = {
+    scored: false,
+    score: null,
+    belowPolicy: false,
+    tier: null,
+    reasonL10n: null,
+  };
+  if (!password || !tierName) {
+    return nothing;
+  }
+  const resolved = resolveTier(tierName, custom);
+  const { score, reasonL10n } = estimateScore(password);
+  if (score === null) {
+    // Nothing trustworthy to say, so say nothing.
+    return { ...nothing, tier: resolved.name };
+  }
+  return {
+    scored: true,
+    score,
+    belowPolicy: score < resolved.rules.minStrength,
+    tier: resolved.name,
+    reasonL10n,
+  };
 }
 
 /**

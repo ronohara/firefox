@@ -2,11 +2,18 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-const lazy = {};
-ChromeUtils.defineESModuleGetters(lazy, {
-  PrimaryPasswordPolicy: "resource://gre/modules/PrimaryPasswordPolicy.sys.mjs",
-  ProfileKekPassword: "resource://gre/modules/ProfileKekPassword.sys.mjs",
-});
+// `PrimaryPasswordPolicy` is bound to the module *namespace*, not destructured.
+// That distinction is the bug this code had: the module exports individual
+// functions and constants (`TIER_PREF`, `RULES`, `resolveTier`, ...) and no
+// member called `PrimaryPasswordPolicy`, so `{ PrimaryPasswordPolicy }` was
+// `undefined` and every policy read threw. `ProfileKekPassword` does export a
+// member of that name, so it is destructured.
+var PrimaryPasswordPolicy = ChromeUtils.importESModule(
+  "resource://gre/modules/PrimaryPasswordPolicy.sys.mjs"
+);
+var { ProfileKekPassword } = ChromeUtils.importESModule(
+  "resource://gre/modules/ProfileKekPassword.sys.mjs"
+);
 
 /**
  * The rule set in force for this dialog, resolved once when it opens.
@@ -22,31 +29,78 @@ ChromeUtils.defineESModuleGetters(lazy, {
 var gPolicy = null;
 
 /**
+ * Pre-formatted policy strings, filled once when the dialog opens.
+ *
+ * Rendering happens on every keystroke, and `document.l10n.formatValues()`
+ * returns a promise. Awaiting it there would make the accept button's state
+ * lag the typing, so the strings are formatted once at open and the keystroke
+ * path stays synchronous. A miss falls back to the rule id rather than
+ * blocking -- an untranslated rule should read oddly, not hang the dialog.
+ *
+ * @type {Map<string, string>}
+ */
+var gPolicyText = new Map();
+
+/**
+ * Formats every rule and reason string the dialog can show.
+ *
+ * @returns {Promise<void>}
+ */
+async function loadPolicyText() {
+  const ids = [
+    ...PrimaryPasswordPolicy.RULES.map(r => r.l10n),
+    ...Object.values(PrimaryPasswordPolicy.PATTERN_L10N),
+  ];
+  const unique = [...new Set(ids)];
+  const min = gPolicy?.rules?.minLength ?? 0;
+  const results = await document.l10n.formatValues(
+    unique.map(id =>
+      id === "primary-password-policy-min-length"
+        ? { id, args: { min } }
+        : { id }
+    )
+  );
+  gPolicyText = new Map(unique.map((id, i) => [id, results[i]]));
+}
+
+/**
  * Reads the tier preference and resolves it.
  *
  * @returns {{name: string, rules: object}|null} null when no policy is set.
  */
+/**
+ * The custom tier's fields, as stored by the Preferences policy.
+ *
+ * @returns {object|null} null when unset or not JSON.
+ */
+function readCustomPolicy() {
+  const raw = Services.prefs.getStringPref(
+    PrimaryPasswordPolicy.CUSTOM_PREF,
+    ""
+  );
+  if (!raw) {
+    return null;
+  }
+  try {
+    return JSON.parse(raw);
+  } catch (ex) {
+    console.error("Primary Password policy: custom tier is not JSON", ex);
+    return null;
+  }
+}
+
 function readPolicy() {
   const tier = Services.prefs.getStringPref(
-    lazy.PrimaryPasswordPolicy.TIER_PREF,
+    PrimaryPasswordPolicy.TIER_PREF,
     ""
   );
   if (!tier) {
     return null;
   }
-  let custom = null;
-  const raw = Services.prefs.getStringPref(
-    lazy.PrimaryPasswordPolicy.CUSTOM_PREF,
-    ""
+  const resolved = PrimaryPasswordPolicy.resolveTier(
+    tier,
+    readCustomPolicy()
   );
-  if (raw) {
-    try {
-      custom = JSON.parse(raw);
-    } catch (ex) {
-      console.error("Primary Password policy: custom tier is not JSON", ex);
-    }
-  }
-  const resolved = lazy.PrimaryPasswordPolicy.resolveTier(tier, custom);
   if (resolved.unknownTier) {
     console.warn(
       `Primary Password policy: unknown tier "${resolved.requested}", ` +
@@ -57,7 +111,22 @@ function readPolicy() {
 }
 
 function init() {
-  gPolicy = readPolicy();
+  // A policy is an optional extra, so failing to read one must not stop the
+  // dialog working. It did: an exception here skipped every listener below,
+  // and the dialog then opened, ignored accept, and closed as though it had
+  // saved -- a password change that silently did nothing.
+  try {
+    gPolicy = readPolicy();
+  } catch (ex) {
+    gPolicy = null;
+    console.error("Primary Password policy: could not be read", ex);
+  }
+  // Formatting is async but nothing is typed yet, so the keystroke path below
+  // can read the cache synchronously. A failure leaves the map empty and the
+  // dialog falls back to rule ids.
+  loadPolicyText().catch(ex =>
+    console.error("Primary Password policy: strings unavailable", ex)
+  );
   process();
   document.addEventListener("dialogaccept", setPassword);
   document.getElementById("pw1").addEventListener("input", () => {
@@ -132,19 +201,33 @@ async function setPassword(event) {
     // Without a KEK the update would create one from an old password nothing
     // here can verify, so that is left to the next startup, which checks it
     // against the token first.
-    if (!token.hasPassword || (await lazy.ProfileKekPassword.exists())) {
-      await lazy.ProfileKekPassword.update(oldpwbox.value, pw1.value);
+    if (!token.hasPassword || (await ProfileKekPassword.exists())) {
+      await ProfileKekPassword.update(oldpwbox.value, pw1.value);
       kekMoved = true;
     }
+    // Scored before the change, reported after it: the advisory must not be
+    // able to influence whether the change happens, so it is captured here and
+    // only reported once the outcome is already decided.
+    const oldScore = scoreOldPassword(oldpwbox.value);
+
     await token.changePassword(oldpwbox.value, pw1.value);
     createAlert(
       "pw-change-success-title",
       pw1.value == "" ? "settings-pp-erased-ok" : "pp-change-ok"
     );
+    // Item 59: an existing weak password is reported, not enforced. Nothing
+    // here can undo the change or block it -- the password has already changed
+    // and the dialog is about to close.
+    if (oldScore?.belowPolicy) {
+      console.warn(
+        `Primary Password: the previous password was below the ` +
+          `"${oldScore.tier}" policy (score ${oldScore.score})`
+      );
+    }
     window.close();
   } catch (e) {
     if (kekMoved) {
-      await lazy.ProfileKekPassword.update(pw1.value, oldpwbox.value).catch(
+      await ProfileKekPassword.update(pw1.value, oldpwbox.value).catch(
         rollbackError =>
           console.error("Failed to roll back the lockstore KEK", rollbackError)
       );
@@ -195,22 +278,29 @@ async function setPassword(event) {
  */
 function evaluatePassword(password) {
   if (!gPolicy) {
-    return { meter: legacyMeter(password), failures: [], score: null };
+    return {
+      meter: legacyMeter(password),
+      failures: [],
+      score: null,
+      reasonL10n: null,
+    };
   }
 
   // Computed once and reused: `failingRules()` accepts the score so the
   // estimator does not run twice per keystroke, and the meter reads the same
-  // number the gate refused on.
-  const { score } = lazy.PrimaryPasswordPolicy.estimateScore(password);
+  // number the gate refused on. `reasonL10n` comes from the same call, so the
+  // explanation cannot describe a different score from the one refused.
+  const { score, reasonL10n } =
+    PrimaryPasswordPolicy.estimateScore(password);
   const failures = password
-    ? lazy.PrimaryPasswordPolicy.failingRules(password, gPolicy.rules, () => ({
+    ? PrimaryPasswordPolicy.failingRules(password, gPolicy.rules, () => ({
         score,
       }))
     : [];
 
   // An empty password is the removal case: no bar, nothing refused.
   const meter = password ? meterForScore(score) : 0;
-  return { meter, failures, score };
+  return { meter, failures, score, reasonL10n };
 }
 
 /**
@@ -275,9 +365,63 @@ function setPasswordStrength() {
 }
 
 /**
- * Shows which policy rules the typed password fails, and reports whether any
- * do. The element is left hidden when no policy is set, so no new markup
- * appears for an application that does not configure one.
+ * Scores the existing password the user just typed, as advice.
+ *
+ * Returns null rather than throwing, and returns null whenever there is
+ * nothing to say -- no policy, no plaintext, or an estimator that could not
+ * answer. The caller reports and never acts on it: Item 59 requires that a
+ * weak existing password cannot keep anyone out of their own profile.
+ *
+ * The deliberate position worth recording: this is the only place an existing
+ * password's plaintext reaches JavaScript. The unlock prompt belongs to the
+ * platform and the string passes from that dialog into NSS without crossing
+ * script, so scoring at *unlock* would mean replacing the window watcher and
+ * intercepting every dialog in the application. That trade is not worth a
+ * notice, and the plan records it as the reason this item is Partial.
+ *
+ * In Firefox the `PrimaryPassword` getter is undefined, so this returns null
+ * and the dialog behaves exactly as before.
+ *
+ * @param {string} password
+ * @returns {{score: number, belowPolicy: boolean, tier: string}|null}
+ */
+function scoreOldPassword(password) {
+  if (!password) {
+    return null;
+  }
+  try {
+    // The policy module holds the tiers and the estimator, so the question is
+    // answered there rather than in this dialog -- and it stays inside the
+    // one namespace a toolkit file may reach.
+    const result = PrimaryPasswordPolicy.scoreExistingPassword(
+      password,
+      Services.prefs.getStringPref(PrimaryPasswordPolicy.TIER_PREF, ""),
+      readCustomPolicy()
+    );
+    if (!result.scored) {
+      return null;
+    }
+    return {
+      score: result.score,
+      belowPolicy: result.belowPolicy,
+      tier: result.tier,
+    };
+  } catch (ex) {
+    console.error("Primary Password: old password not scored", ex);
+    return null;
+  }
+}
+
+/**
+ * Shows which policy rules the typed password fails, and why, and reports
+ * whether any do. The element is left hidden when no policy is set, so no new
+ * markup appears for an application that does not configure one.
+ *
+ * Each failing rule is named by its own localized message, and a strength
+ * failure is followed by the pattern that explains it -- "this is a common
+ * word" teaches, where "too weak" does not. The list comes from the rule data
+ * rather than from a chain of conditions, so a rule added to
+ * `PrimaryPasswordPolicy.RULES` appears here without a change.
  *
  * @param {string} password
  * @param {object} [evaluation] The result of `evaluatePassword()` for this
@@ -291,52 +435,34 @@ function updatePolicyFeedback(password, evaluation) {
     el.hidden = true;
     return true;
   }
-  // Takes the evaluation the meter also read, rather than recomputing: with an
-  // estimator behind it, computing twice per keystroke would be wasteful and
-  // -- worse -- two computations could disagree, which is the failure this
-  // item exists to remove.
-  const { failures } = evaluation ?? evaluatePassword(password);
+  const { failures, reasonL10n } = evaluation ?? evaluatePassword(password);
   // An empty password is the removal case, which the dialog's own rules
   // govern; nothing is reported against it.
   if (!password || !failures.length) {
     el.hidden = true;
     return true;
   }
+
+  const parts = failures.map(rule => textForRule(rule));
+  if (failures.includes("strength") && reasonL10n) {
+    parts.push(gPolicyText.get(reasonL10n) ?? reasonL10n);
+  }
+
   el.hidden = false;
-  el.textContent = `${gPolicy.name} policy: ${failures
-    .map(describeRule)
-    .join("; ")}`;
+  el.textContent = parts.join(" ");
   return false;
 }
 
 /**
- * Human wording for a failing rule.
+ * The localized wording for one failing rule.
  *
- * Deliberately not localized in this change: the policy is new, the wording
- * is provisional, and adding Fluent strings for a feature whose tier is still
- * being chosen would fix the text before the requirement is settled. The plan
- * records this as a follow-up rather than presenting the English as final.
- *
- * @param {string} rule
- * @returns {string}
+ * @param {string} rule A rule id from `PrimaryPasswordPolicy`.
+ * @returns {string} The formatted message, or the rule id when the string is
+ *   not available -- odd to read, but never a hang and never a blank.
  */
-function describeRule(rule) {
-  switch (rule) {
-    case "min-length":
-      return `at least ${gPolicy.rules.minLength} characters`;
-    case "uppercase":
-      return "an uppercase letter";
-    case "lowercase":
-      return "a lowercase letter";
-    case "digit":
-      return "a digit";
-    case "special":
-      return "a symbol";
-    case "strength":
-      return "a less predictable password";
-    default:
-      return rule;
-  }
+function textForRule(rule) {
+  const id = PrimaryPasswordPolicy.ruleL10nId(rule);
+  return (id && gPolicyText.get(id)) || rule;
 }
 
 function checkPasswords() {
