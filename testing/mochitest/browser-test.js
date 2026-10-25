@@ -703,7 +703,9 @@ Tester.prototype = {
         }
       }
 
-      // Tests shouldn't leave sidebars open
+      // Tests shouldn't leave sidebars open. Not every application's test
+      // window has a sidebar: Thunderbird's messenger window has no
+      // `sidebar-box`, so there is nothing that could have been left open.
       if (this.currentTest) {
         this.currentTest.addResult(
           new testMessage("checking for open sidebars")
@@ -712,7 +714,7 @@ Tester.prototype = {
         this.structuredLogger.info("checking for open sidebars");
       }
       const sidebarContainer = document.getElementById("sidebar-box");
-      if (!sidebarContainer.hidden) {
+      if (sidebarContainer && !sidebarContainer.hidden) {
         window.SidebarController.hide({ dismissPanel: true });
         this.currentTest.addResult(
           new testResult({
@@ -1225,6 +1227,15 @@ Tester.prototype = {
    * fresh Session Restore state.
    */
   resetSessionState() {
+    // An application whose front end has no SessionStore global has no
+    // closed-window, closed-tab or tab-group state to forget. Thunderbird is
+    // one: it ships a SessionStore *module* with two no-op methods for the
+    // callers it needs, and no window global at all. Guarding here rather
+    // than at each call keeps the Firefox path byte-for-byte unchanged.
+    if (!window.SessionStore) {
+      return;
+    }
+
     // Forget all closed windows.
     while (window.SessionStore.getClosedWindowCount() > 0) {
       window.SessionStore.forgetClosedWindow(0);

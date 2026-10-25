@@ -4277,9 +4277,16 @@ void CheckForBrokenChromeURL(nsILoadInfo* aLoadInfo, nsIURI* aURI) {
       StringBeginsWith(spec, "resource://android/assets/web_extensions/"_ns)) {
     return;
   }
+#endif
 
-  // browser/ is not built for GeckoView, so toolkit code that references it
-  // can never resolve these here.
+  // browser/ is not built for GeckoView, and it is not built for Thunderbird
+  // either (a --enable-project=comm/mail build packages moz-src/comm and
+  // moz-src/toolkit but no moz-src/browser). Toolkit and devtools code that
+  // references it therefore cannot resolve there, and that is not a defect in
+  // the application being tested: the reference is conditional on a front end
+  // those builds do not have. See also the GeckoView clause above, which is
+  // the same situation.
+#if defined(ANDROID) || defined(MOZ_THUNDERBIRD)
   if (StringBeginsWith(spec, "moz-src:///browser/"_ns)) {
     return;
   }
