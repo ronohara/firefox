@@ -430,6 +430,11 @@ CLAUDE.local.md
 **/.claude/worktrees/
 .worktreeinclude
 
+# Ignore local agent instructions, agent tool state and context handoff files
+AGENTS.md
+.codewhale/
+context-transfer*.md
+
 # Ignore .json.gz (typically profiles) in the root directory
 # lint-ignore-next-line: git-only
 /*.json.gz
