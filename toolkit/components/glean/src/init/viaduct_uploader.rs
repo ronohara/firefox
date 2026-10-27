@@ -22,7 +22,18 @@ impl PingUploader for ViaductUploader {
     /// # Arguments
     ///
     /// * `upload_request` - the ping and its metadata to upload.
+    #[allow(unreachable_code)]
     fn upload(&self, upload_request: CapablePingUploadRequest) -> UploadResult {
+        // COLDFORK-NO-NET: Coldfork never uploads Glean pings. This is the single uploader
+        // the application registers (init/mod.rs), so returning here covers every
+        // Glean ping regardless of network config, server or build feature.
+        //
+        // Success rather than failure on purpose: a failure result makes Glean
+        // retry, so the ping queue would grow on disk forever. 200 means "sent",
+        // and the ping is discarded quietly.
+        log::info!("COLDFORK-NO-NET: FOG ping upload disabled, discarding ping");
+        return UploadResult::http_status(200);
+
         let mut requires_ohttp = false;
         let upload_request = match upload_request.capable(|capabilities| {
             requires_ohttp = capabilities == ["ohttp"];

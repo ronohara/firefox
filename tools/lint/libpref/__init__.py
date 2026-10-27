@@ -23,6 +23,12 @@ IGNORE_PREFS = {
     "extensions.backgroundServiceWorker.enabled",  # NOQA: E501; Uses the 'locked' attribute.
     "general.smoothScroll",  # Uses the 'sticky` attribute.
     "security.storage.encryption.sqlite.enabled",  # NOQA: E501; Uses the 'locked' attribute.
+    # Coldfork: Thunderbird turns telemetry off by default, and libpref's own
+    # static default is already false -- but all.js raises it to true under
+    # MOZ_SERVICES_HEALTHREPORT on desktop, so comm has to restate false on top.
+    # check_value_for_pref flags a duplicate whose value *matches* the static
+    # default, which is exactly what that override looks like.
+    "datareporting.healthreport.uploadEnabled",
 }
 
 # A regular expression to match preference names and values from js preference

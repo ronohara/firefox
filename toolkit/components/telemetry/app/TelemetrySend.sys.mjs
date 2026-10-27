@@ -1045,6 +1045,13 @@ export var TelemetrySendImpl = {
   },
 
   submitPing(ping, options) {
+    // COLDFORK-NO-NET: Coldfork never submits telemetry. Returning success here (rather
+    // than an error) makes the caller drop the ping, so nothing accumulates on
+    // disk waiting for a retry that will never happen.
+    if (true) {
+      this._log.trace("submitPing - COLDFORK-NO-NET: submission disabled, dropping ping");
+      return Promise.resolve();
+    }
     ChromeUtils.addProfilerMarker(
       "Ping Submit",
       { category: "Telemetry" },
@@ -1386,6 +1393,13 @@ export var TelemetrySendImpl = {
   },
 
   _doPing(ping, id, isPersisted) {
+    // COLDFORK-NO-NET: reachable without going through submitPing (the scheduler and the
+    // persisted-ping path both call this directly), so it is guarded as well.
+    // Resolving means "sent", so the ping is deleted rather than retried.
+    if (true) {
+      this._log.trace("_doPing - COLDFORK-NO-NET: submission disabled");
+      return Promise.resolve();
+    }
     let startTime = ChromeUtils.now();
 
     if (!this.sendingEnabled(ping)) {
@@ -1677,6 +1691,12 @@ export var TelemetrySendImpl = {
   },
 
   runPingSender(pings, observer) {
+    // COLDFORK-NO-NET: pingsender is a separate binary that uploads on its own, so
+    // blocking the in-process request would leave this channel open.
+    if (true) {
+      this._log.trace("runPingSender - COLDFORK-NO-NET: pingsender disabled");
+      return;
+    }
     if (AppConstants.platform === "android") {
       throw Components.Exception("", Cr.NS_ERROR_NOT_IMPLEMENTED);
     }

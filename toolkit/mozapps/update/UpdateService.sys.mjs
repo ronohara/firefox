@@ -5491,6 +5491,11 @@ export class CheckerService {
    * See nsIUpdateService.idl
    */
   async getUpdateURL(checkType) {
+    // COLDFORK-NO-NET: Coldfork never checks for updates. The caller already handles a
+    // null URL by logging "update URL not defined" and stopping, so no request
+    // is made and nothing else has to change.
+    LOG("CheckerService:getUpdateURL - COLDFORK-NO-NET: update check disabled");
+    return null;
     LOG("CheckerService:getUpdateURL - checkType: " + checkType);
     if (!this.#validUpdateCheckType(checkType)) {
       LOG("CheckerService:getUpdateURL - Invalid checkType");

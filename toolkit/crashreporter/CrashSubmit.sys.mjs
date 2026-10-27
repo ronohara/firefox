@@ -125,6 +125,10 @@ Submitter.prototype = {
   },
 
   submitForm: function Submitter_submitForm() {
+    // COLDFORK-NO-NET: Coldfork never submits crash reports. Returning false
+    // takes the caller's existing "not sent" path, so the dump stays on disk
+    // and still appears in about:crashes, where a user can inspect or delete it.
+    return false;
     this.submittedExtraKeyVals = {};
 
     if (!("ServerURL" in this.extraKeyVals)) {

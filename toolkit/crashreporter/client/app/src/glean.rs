@@ -170,7 +170,14 @@ mod uploader {
     }
 
     impl PingUploader for Uploader {
+        #[allow(unreachable_code)]
         fn upload(&self, upload_request: CapablePingUploadRequest) -> UploadResult {
+            // COLDFORK-NO-NET: the crash client is a separate process with its own uploader,
+            // so the in-process guard does not reach it. The crash ping it sends
+            // every time it runs is blocked here.
+            log::info!("COLDFORK-NO-NET: crash client glean upload disabled");
+            return UploadResult::http_status(200);
+
             let upload_request = upload_request.capable(|cap| cap.is_empty()).unwrap();
             let request_builder = http::RequestBuilder::Post {
                 body: upload_request.body.as_slice(),

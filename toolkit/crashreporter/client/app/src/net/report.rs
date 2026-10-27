@@ -40,6 +40,12 @@ pub struct CrashReport<'a> {
 impl CrashReport<'_> {
     /// Send the crash report.
     pub fn send(&self) -> anyhow::Result<Response> {
+        // COLDFORK-NO-NET: Coldfork never uploads a crash report. An empty Response is
+        // returned rather than an error, so the caller records the report as
+        // unsubmitted and keeps the dump files instead of deleting them.
+        log::info!("COLDFORK-NO-NET: crash report upload disabled");
+        return Ok(Response::default());
+
         let mut request = None;
 
         #[cfg(mock)]

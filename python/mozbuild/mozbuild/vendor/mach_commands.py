@@ -3,6 +3,7 @@
 # file, # You can obtain one at http://mozilla.org/MPL/2.0/.
 
 import logging
+import os
 import shutil
 import sys
 
@@ -81,6 +82,9 @@ def vendor(
     library = library[0]
     assert library not in ["rust", "python", "node"]
 
+    if coldfork_require_vendor_opt_in(command_context):
+        return 1
+
     command_context.populate_logger()
     command_context.log_manager.enable_unstructured()
     if check_for_update:
@@ -158,7 +162,79 @@ def vendor(
         new_files_only,
     )
 
-    return 0
+    return coldfork_verify_after_vendor(command_context)
+
+
+# =====================================================================
+# Coldfork: freezing remote-reporting removal against vendoring
+# =====================================================================
+
+COLDFORK_VENDOR_ENV = "COLDFORK_ALLOW_VENDOR"
+COLDFORK_VERIFIER = os.path.join("comm", "tools", "verify-no-remote-reporting.sh")
+
+
+def coldfork_require_vendor_opt_in(command_context):
+    """Refuse to vendor unless the operator has said so explicitly.
+
+    Vendoring rewrites files under toolkit/ and third_party/, which is where
+    Coldfork's telemetry / crash-report / update removals live. That removal is
+    committed, so `check_modified_files` does not notice it and the vendoring
+    would clobber it silently. Requiring one environment variable turns an
+    accidental revert into a deliberate act.
+    """
+    if os.environ.get(COLDFORK_VENDOR_ENV) == "1":
+        return 0
+
+    command_context.log(
+        logging.ERROR,
+        "coldfork-vendor-gated",
+        {},
+        """Vendoring is gated in this fork.
+
+This tree carries committed removals of the remote-reporting send paths
+(telemetry, crash reports, update checks). Vendoring can overwrite them, and
+the result would be silent: telemetry would simply start working again.
+
+If you have read comm/tools/lint/commlint/no_remote_reporting.py, intend to
+keep those guards, and will re-apply any that this vendoring reverts, re-run:
+
+    {env}=1 ./mach vendor ...
+
+The verifier runs automatically afterwards and will fail loudly if a guard is
+missing, so an unnoticed revert cannot survive the command.
+""".format(env=COLDFORK_VENDOR_ENV),
+    )
+    return 1
+
+
+def coldfork_verify_after_vendor(command_context):
+    """Run the remote-reporting verifier; non-zero if a guard went missing."""
+    root = command_context.topsrcdir
+    script = os.path.join(root, COLDFORK_VERIFIER)
+    if not os.path.exists(script):
+        command_context.log(
+            logging.ERROR,
+            "coldfork-verifier-missing",
+            {},
+            "Coldfork verifier is missing: %s" % script,
+        )
+        return 1
+
+    import subprocess
+
+    result = subprocess.run([script], capture_output=True, text=True)
+    if result.returncode == 0:
+        command_context.log(logging.INFO, "coldfork-verified", {}, result.stdout.strip())
+        return 0
+
+    command_context.log(
+        logging.ERROR,
+        "coldfork-regression",
+        {},
+        "Coldfork remote-reporting removal was reverted by this vendoring:\n%s\n%s"
+        % (result.stdout.strip(), result.stderr.strip()),
+    )
+    return 1
 
 
 def check_modified_files(command_context):
@@ -212,6 +288,8 @@ Please commit or stash these changes before vendoring, or re-run with `--ignore-
     help="Path to a diff. file to write out, if there are uncommitted changes present after running",
 )
 def vendor_rust(command_context, **kwargs):
+    if coldfork_require_vendor_opt_in(command_context):
+        sys.exit(1)
     from mozbuild.vendor.vendor_rust import VendorRust
 
     vendor_command = command_context._spawn(VendorRust)
@@ -225,7 +303,7 @@ def vendor_rust(command_context, **kwargs):
         with open(vcs_diff, "w", encoding="utf-8", newline="\n") as fh:
             shutil.copyfileobj(vendor_command.generate_diff_stream(), fh)
     if ok:
-        sys.exit(0)
+        sys.exit(coldfork_verify_after_vendor(command_context))
     else:
         print("Errors occurred; new rust crates were not vendored.")
         sys.exit(1)
